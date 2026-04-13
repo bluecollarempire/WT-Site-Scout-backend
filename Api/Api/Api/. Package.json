@@ -1,0 +1,9 @@
+{
+  "name": "wt-site-scout-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "stripe": "^14.10.0"
+  }
+}
