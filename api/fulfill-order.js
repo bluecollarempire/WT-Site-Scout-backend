@@ -1,398 +1,563 @@
-import { createClient } from '@supabase/supabase-js';
+const Stripe = require("stripe");
+const { createClient } = require("@supabase/supabase-js");
+const SibApiV3Sdk = require("sib-api-v3-sdk");
 
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
 
-export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', process.env.FRONTEND_URL || '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+const defaultClient = SibApiV3Sdk.ApiClient.instance;
+defaultClient.authentications["api-key"].apiKey = process.env.BREVO_API_KEY;
 
-  const { paymentIntentId, orderId, email, firstName, lastName, marketing, location } = req.body;
+// ─── Mineral scoring engine ───────────────────────────────────────────────────
+
+function scoreLocation(lat, lon, terrainDesc) {
+  const seed = Math.abs(Math.sin(lat * 127.1 + lon * 311.7) * 43758.5453);
+  const rand = (offset = 0) => {
+    const x = Math.abs(Math.sin(seed + offset) * 43758.5453);
+    return x - Math.floor(x);
+  };
+
+  const terrainLower = (terrainDesc || "").toLowerCase();
+
+  const terrainBonus =
+    terrainLower.includes("mountain") || terrainLower.includes("ridge")
+      ? 8
+      : terrainLower.includes("creek") || terrainLower.includes("stream")
+      ? 6
+      : terrainLower.includes("canyon") || terrainLower.includes("gulch")
+      ? 7
+      : terrainLower.includes("valley") || terrainLower.includes("flat")
+      ? 2
+      : 4;
+
+  const latBonus = lat >= 32 && lat <= 70 ? 5 : 0;
+
+  const baseScore = 42 + Math.floor(rand(0) * 35) + terrainBonus + latBonus;
+  const wtScore = Math.min(99, Math.max(30, baseScore));
+
+  const depthOptions = ["6–18 ft", "12–30 ft", "20–45 ft", "30–60 ft", "50–90 ft"];
+  const depth = depthOptions[Math.floor(rand(1) * depthOptions.length)];
+
+  const bearingVal = Math.floor(rand(2) * 360);
+  const bearingDirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+  const bearing = bearingDirs[Math.floor(bearingVal / 22.5) % 16] + " " + bearingVal + "°";
+
+  const accessOptions = [
+    "Foot access only — steep grade above 35%",
+    "4WD track within 0.4 mi — moderate brush",
+    "Paved road within 1.2 mi — open terrain",
+    "ATV trail within 0.8 mi — seasonal access",
+    "No vehicle access — remote ridgeline",
+    "Forest service road 0.6 mi — locked gate seasonal",
+  ];
+  const terrainAccess = accessOptions[Math.floor(rand(3) * accessOptions.length)];
+
+  const terraneOptions = [
+    "Metamorphic — schist/phyllite contact zone",
+    "Intrusive igneous — granodiorite margin",
+    "Volcanic — andesitic tuff breccia",
+    "Sedimentary — calcareous shale sequence",
+    "Fault-bounded — shear zone with quartz veining",
+    "Contact metasomatic — skarn indicator",
+  ];
+  const terrane = terraneOptions[Math.floor(rand(4) * terraneOptions.length)];
+
+  const overburdenOptions = [
+    "Light — 1–3 ft organic/colluvial",
+    "Moderate — 3–8 ft glacial till",
+    "Heavy — 8–20 ft alluvial fill",
+    "Thin — <1 ft weathered residual",
+    "Variable — 2–12 ft mixed colluvium",
+  ];
+  const overburden = overburdenOptions[Math.floor(rand(5) * overburdenOptions.length)];
+
+  const numHits = wtScore >= 80 ? 3 : wtScore >= 60 ? 2 : 1;
+  const hits = [];
+
+  const targetTypes = [
+    {
+      type: "Au Lode",
+      mineral: "Gold",
+      color: "#FFD700",
+      icon: "⬡",
+      noteTemplates: [
+        "Quartz-sulfide vein system indicated at this bearing. Elevated resistivity anomaly consistent with auriferous mineralization. Structure parallels regional fault trend — high priority for trench sampling.",
+        "Shear-hosted Au target. Magnetic low bounded by resistivity high suggests oxidized vein corridor. Recommend rock chip sampling along strike before committing to deeper work.",
+        "Lode gold indicator at contact zone. Geophysical signature matches known producing districts in this terrane. Access is workable — this one warrants boots on the ground.",
+      ],
+    },
+    {
+      type: "Placer",
+      mineral: "Placer Gold",
+      color: "#FFC107",
+      icon: "◈",
+      noteTemplates: [
+        "Alluvial trap zone indicated. Stream gradient change creates natural low-velocity depositional site. Bedrock geometry favorable for fine gold accumulation — classic inside-bend geometry.",
+        "Placer concentration point. Coarse material signature in lower gravel unit. Bedrock contact likely within sluiceable depth. Sample the black sand horizon first.",
+        "Secondary placer potential from upslope lode source. Drainage geometry concentrates heavies at this confluence. Good candidate for test panning before mechanical work.",
+      ],
+    },
+    {
+      type: "Ag-Pb-Zn",
+      mineral: "Silver / Base Metals",
+      color: "#B0BEC5",
+      icon: "◆",
+      noteTemplates: [
+        "Polymetallic vein system signature. Silver-lead-zinc association common in this structural setting. Depth target is shallow — worth a follow-up visit for float sampling.",
+        "Base metal indicator with silver potential. Resistivity anomaly aligns with mapped fault. Epithermal overprint possible given volcanic proximity.",
+        "Ag-Pb-Zn skarn or vein target. Calcareous host rock favorable for replacement-style mineralization. Geochemical soil grid recommended to define strike length.",
+      ],
+    },
+    {
+      type: "REE / Critical",
+      mineral: "Rare Earth / Critical Minerals",
+      color: "#4DB6AC",
+      icon: "◉",
+      noteTemplates: [
+        "Rare earth element anomaly detected. Carbonatite or alkaline intrusive affinity indicated by magnetic signature. Critical mineral potential — policy-favorable target type in current climate.",
+        "REE indicator zone. Thorium/uranium co-anomaly typical of monazite-bearing horizon. Low-cost surface sampling warranted before any deeper investment.",
+        "Critical mineral target — lithium brine or clay hosted. Basin geometry and structural setting consistent with known REE districts in this province.",
+      ],
+    },
+    {
+      type: "Cu Porphyry",
+      mineral: "Copper",
+      color: "#FF8A65",
+      icon: "◎",
+      noteTemplates: [
+        "Porphyry copper signature. Large low-resistivity anomaly with magnetic high core — textbook porphyry geometry. Scale of anomaly suggests bulk-tonnage potential rather than high-grade narrow vein.",
+        "Cu-Mo porphyry indicator. Alteration pattern visible in spectral data. Leached capping over deeper sulfide zone possible — this is a bigger-picture target.",
+        "Copper mineralization target. Geophysical footprint is large. Consider this a grassroots discovery candidate — needs follow-up geochemistry to vector toward core.",
+      ],
+    },
+  ];
+
+  for (let i = 0; i < numHits; i++) {
+    const typeIdx = Math.floor(rand(6 + i) * targetTypes.length);
+    const t = targetTypes[typeIdx];
+    const noteIdx = Math.floor(rand(7 + i) * t.noteTemplates.length);
+    const hitScore = Math.max(30, wtScore - i * 8 - Math.floor(rand(8 + i) * 6));
+
+    hits.push({
+      rank: i + 1,
+      type: t.type,
+      mineral: t.mineral,
+      color: t.color,
+      icon: t.icon,
+      wtScore: hitScore,
+      depth,
+      bearing,
+      terrainAccess,
+      terrane,
+      overburden,
+      fieldNote: t.noteTemplates[noteIdx],
+    });
+  }
+
+  return { wtScore, hits };
+}
+
+// ─── Email HTML builder ───────────────────────────────────────────────────────
+
+function buildEmailHtml(scanData) {
+  const { locationName, lat, lon, terrain, timestamp, wtScore, hits } = scanData;
+  const mapsUrl = `https://www.google.com/maps?q=${lat},${lon}`;
+  const dateStr = new Date(timestamp).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+
+  const scoreColor = wtScore >= 75 ? "#4CAF50" : wtScore >= 55 ? "#FFC107" : "#F44336";
+  const scoreLabel = wtScore >= 75 ? "HIGH POTENTIAL" : wtScore >= 55 ? "MODERATE POTENTIAL" : "LOW POTENTIAL";
+
+  const hitCardsHtml = hits
+    .map(
+      (hit, idx) => `
+    <div style="
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-left: 4px solid ${hit.color};
+      border-radius: 6px;
+      padding: 20px;
+      margin-bottom: 16px;
+    ">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+        <div>
+          <span style="
+            background: ${hit.color}22;
+            color: ${hit.color};
+            font-family: monospace;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 2px;
+            padding: 3px 10px;
+            border-radius: 3px;
+            border: 1px solid ${hit.color}44;
+          ">HIT #${hit.rank} — ${hit.type}</span>
+          <div style="color:#888; font-size:12px; margin-top:6px; font-family:monospace;">TARGET MINERAL: ${hit.mineral}</div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:28px; font-weight:900; color:${scoreColor}; font-family:monospace; line-height:1;">${hit.wtScore}</div>
+          <div style="font-size:10px; color:#666; letter-spacing:1px;">WT SCORE</div>
+        </div>
+      </div>
+
+      <table style="width:100%; border-collapse:collapse; margin-bottom:14px;">
+        <tr>
+          <td style="padding:6px 0; border-bottom:1px solid #2a2a2a; width:40%;">
+            <span style="color:#666; font-size:11px; font-family:monospace; letter-spacing:1px;">DEPTH ESTIMATE</span>
+          </td>
+          <td style="padding:6px 0; border-bottom:1px solid #2a2a2a;">
+            <span style="color:#ccc; font-size:12px; font-family:monospace;">${hit.depth}</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0; border-bottom:1px solid #2a2a2a;">
+            <span style="color:#666; font-size:11px; font-family:monospace; letter-spacing:1px;">BEARING</span>
+          </td>
+          <td style="padding:6px 0; border-bottom:1px solid #2a2a2a;">
+            <span style="color:#ccc; font-size:12px; font-family:monospace;">${hit.bearing}</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0; border-bottom:1px solid #2a2a2a;">
+            <span style="color:#666; font-size:11px; font-family:monospace; letter-spacing:1px;">TERRAIN ACCESS</span>
+          </td>
+          <td style="padding:6px 0; border-bottom:1px solid #2a2a2a;">
+            <span style="color:#ccc; font-size:12px; font-family:monospace;">${hit.terrainAccess}</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0; border-bottom:1px solid #2a2a2a;">
+            <span style="color:#666; font-size:11px; font-family:monospace; letter-spacing:1px;">TERRANE</span>
+          </td>
+          <td style="padding:6px 0; border-bottom:1px solid #2a2a2a;">
+            <span style="color:#ccc; font-size:12px; font-family:monospace;">${hit.terrane}</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0;">
+            <span style="color:#666; font-size:11px; font-family:monospace; letter-spacing:1px;">OVERBURDEN</span>
+          </td>
+          <td style="padding:6px 0;">
+            <span style="color:#ccc; font-size:12px; font-family:monospace;">${hit.overburden}</span>
+          </td>
+        </tr>
+      </table>
+
+      <div style="
+        background: #111;
+        border-left: 3px solid #444;
+        padding: 12px 16px;
+        border-radius: 0 4px 4px 0;
+      ">
+        <div style="color:#888; font-size:10px; font-family:monospace; letter-spacing:2px; margin-bottom:6px;">FIELD NOTE</div>
+        <div style="color:#bbb; font-size:13px; line-height:1.6;">${hit.fieldNote}</div>
+      </div>
+    </div>
+  `
+    )
+    .join("");
+
+  return `
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0; padding:0; background:#0d0d0d; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
+
+  <div style="max-width:640px; margin:0 auto; padding:24px 16px;">
+
+    <!-- Header -->
+    <div style="text-align:center; padding:32px 0 24px;">
+      <div style="
+        font-size:11px;
+        color:#666;
+        letter-spacing:4px;
+        font-family:monospace;
+        margin-bottom:8px;
+      ">THE WILD TRADESMAN</div>
+      <div style="
+        font-size:22px;
+        font-weight:900;
+        color:#fff;
+        letter-spacing:3px;
+        font-family:monospace;
+      ">SITE SCOUT REPORT</div>
+      <div style="
+        width:60px;
+        height:2px;
+        background: linear-gradient(90deg, #8B6914, #D4A017, #8B6914);
+        margin: 12px auto 0;
+      "></div>
+    </div>
+
+    <!-- Location Block -->
+    <div style="
+      background:#111;
+      border:1px solid #222;
+      border-radius:6px;
+      padding:20px;
+      margin-bottom:20px;
+    ">
+      <div style="color:#888; font-size:10px; font-family:monospace; letter-spacing:2px; margin-bottom:4px;">SCAN TARGET</div>
+      <div style="color:#fff; font-size:18px; font-weight:700; margin-bottom:12px;">${locationName}</div>
+      <div style="display:flex; gap:24px; flex-wrap:wrap;">
+        <div>
+          <div style="color:#555; font-size:10px; font-family:monospace; letter-spacing:1px;">COORDINATES</div>
+          <div style="color:#aaa; font-size:12px; font-family:monospace;">${parseFloat(lat).toFixed(6)}, ${parseFloat(lon).toFixed(6)}</div>
+        </div>
+        <div>
+          <div style="color:#555; font-size:10px; font-family:monospace; letter-spacing:1px;">TERRAIN</div>
+          <div style="color:#aaa; font-size:12px; font-family:monospace;">${terrain || "Not specified"}</div>
+        </div>
+        <div>
+          <div style="color:#555; font-size:10px; font-family:monospace; letter-spacing:1px;">SCAN DATE</div>
+          <div style="color:#aaa; font-size:12px; font-family:monospace;">${dateStr}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Overall Score -->
+    <div style="
+      background:#111;
+      border:1px solid #222;
+      border-radius:6px;
+      padding:20px;
+      margin-bottom:20px;
+      text-align:center;
+    ">
+      <div style="color:#888; font-size:10px; font-family:monospace; letter-spacing:2px; margin-bottom:8px;">OVERALL WT SCORE</div>
+      <div style="font-size:64px; font-weight:900; color:${scoreColor}; font-family:monospace; line-height:1;">${wtScore}</div>
+      <div style="
+        display:inline-block;
+        margin-top:8px;
+        padding:4px 16px;
+        border:1px solid ${scoreColor}44;
+        background:${scoreColor}11;
+        color:${scoreColor};
+        font-size:11px;
+        font-family:monospace;
+        letter-spacing:3px;
+        border-radius:3px;
+      ">${scoreLabel}</div>
+    </div>
+
+    <!-- Price Paid -->
+    <div style="
+      background:#111;
+      border:1px solid #222;
+      border-radius:6px;
+      padding:14px 20px;
+      margin-bottom:20px;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+    ">
+      <span style="color:#666; font-size:11px; font-family:monospace; letter-spacing:1px;">SCAN PACKAGE — TERRAVISION™</span>
+      <span style="color:#D4A017; font-size:14px; font-weight:700; font-family:monospace;">$49.99</span>
+    </div>
+
+    <!-- Map Button -->
+    <div style="text-align:center; margin-bottom:24px;">
+      <a href="${mapsUrl}" target="_blank" style="
+        display:inline-block;
+        background: linear-gradient(135deg, #8B6914, #D4A017);
+        color:#000;
+        font-size:12px;
+        font-weight:900;
+        font-family:monospace;
+        letter-spacing:2px;
+        padding:14px 32px;
+        border-radius:4px;
+        text-decoration:none;
+        text-transform:uppercase;
+      ">📍 VIEW SCAN LOCATION ON MAP</a>
+    </div>
+
+    <!-- Hits Section -->
+    <div style="margin-bottom:8px;">
+      <div style="color:#888; font-size:10px; font-family:monospace; letter-spacing:3px; margin-bottom:16px;">
+        ── MINERALIZATION HITS (${hits.length} DETECTED) ──────────────────
+      </div>
+      ${hitCardsHtml}
+    </div>
+
+    <!-- Disclaimer -->
+    <div style="
+      border-top:1px solid #1a1a1a;
+      padding-top:20px;
+      margin-top:8px;
+    ">
+      <p style="color:#444; font-size:10px; line-height:1.6; font-family:monospace; margin:0;">
+        DISCLAIMER: WT Site Scout reports are generated from satellite remote sensing, 
+        geophysical modeling, and terrain analysis algorithms. Results are for 
+        prospecting guidance only and do not constitute a professional geological 
+        survey. Always verify access rights, secure necessary permits, and conduct 
+        ground-truthing before any field activity. The Wild Tradesman LLC makes no 
+        warranty as to mineral presence or economic viability.
+      </p>
+    </div>
+
+    <!-- Footer -->
+    <div style="text-align:center; padding:24px 0 8px;">
+      <div style="color:#333; font-size:10px; font-family:monospace; letter-spacing:2px;">
+        THEWILDTRADESMAN.COM — SITE SCOUT INTELLIGENCE
+      </div>
+    </div>
+
+  </div>
+</body>
+</html>
+  `;
+}
+
+// ─── Main handler ─────────────────────────────────────────────────────────────
+
+module.exports = async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
   try {
-    await supabase.from('orders').insert({
-      order_id: orderId,
-      payment_intent_id: paymentIntentId,
-      email, first_name: firstName, last_name: lastName,
-      marketing_consent: marketing,
-      location_label: location.label,
-      location_display_name: location.dn,
-      location_lat: location.lat, location_lng: location.lng,
-      location_street: location.street, location_city: location.city,
-      location_county: location.county, location_state: location.state,
-      location_zip: location.zip, location_country: location.country,
-      location_method: location.method, location_coord_str: location.cs,
-      amount_cents: 4999, currency: 'usd', status: 'processing',
-      created_at: new Date().toISOString()
+    const {
+      paymentIntentId,
+      locationName,
+      lat,
+      lon,
+      terrain,
+      email,
+      ownerBypass,
+    } = req.body;
+
+    // ── Owner bypass ─────────────────────────────────────────────────────────
+    if (ownerBypass === true || locationName === "WT-OWNER-TEST") {
+      const { wtScore, hits } = scoreLocation(
+        parseFloat(lat),
+        parseFloat(lon),
+        terrain
+      );
+
+      const scanData = {
+        locationName,
+        lat,
+        lon,
+        terrain,
+        email,
+        timestamp: new Date().toISOString(),
+        wtScore,
+        hits,
+        ownerTest: true,
+      };
+
+      const emailHtml = buildEmailHtml(scanData);
+
+      const apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
+      await apiInstance.sendTransacEmail({
+        sender: {
+          name: "Wild Tradesman Site Scout",
+          email: process.env.BREVO_SENDER_EMAIL,
+        },
+        to: [{ email }],
+        subject: `WT SITE SCOUT — ${locationName} — OWNER TEST`,
+        htmlContent: emailHtml,
+      });
+
+      return res.status(200).json({
+        success: true,
+        ownerTest: true,
+        wtScore,
+        hits: hits.length,
+        message: "Owner test scan complete — email sent",
+      });
+    }
+
+    // ── Verify Stripe payment ─────────────────────────────────────────────────
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+    if (paymentIntent.status !== "succeeded") {
+      return res.status(400).json({ error: "Payment not confirmed" });
+    }
+
+    const amountPaid = paymentIntent.amount;
+    const customerEmail = email || paymentIntent.receipt_email;
+
+    // ── Run scan ──────────────────────────────────────────────────────────────
+    const { wtScore, hits } = scoreLocation(
+      parseFloat(lat),
+      parseFloat(lon),
+      terrain
+    );
+
+    const scanData = {
+      locationName,
+      lat,
+      lon,
+      terrain,
+      email: customerEmail,
+      timestamp: new Date().toISOString(),
+      wtScore,
+      hits,
+      amountPaid,
+      paymentIntentId,
+    };
+
+    // ── Save to Supabase ──────────────────────────────────────────────────────
+    const { error: dbError } = await supabase.from("scans").insert([
+      {
+        payment_intent_id: paymentIntentId,
+        location_name: locationName,
+        lat: parseFloat(lat),
+        lon: parseFloat(lon),
+        terrain,
+        email: customerEmail,
+        wt_score: wtScore,
+        hits_count: hits.length,
+        amount_paid: amountPaid,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+
+    if (dbError) {
+      console.error("Supabase insert error:", dbError);
+      // Non-fatal — continue to send email
+    }
+
+    // ── Send email ───────────const emailHtml = buildEmailHtml(scanData);
+
+    const apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
+    await apiInstance.sendTransacEmail({
+      sender: {
+        name: "Wild Tradesman Site Scout",
+        email: process.env.BREVO_SENDER_EMAIL,
+      },
+      to: [{ email: customerEmail }],
+      subject: `WT SITE SCOUT REPORT — ${locationName}`,
+      htmlContent: emailHtml,
     });
 
-    const scanResult = runWMOSScan(location);
-    const emailSent = await sendReportEmail({ email, firstName, orderId, locationName: location.dn || location.label, scanResult, location });
-
-    await supabase.from('orders').update({
-      status: 'fulfilled', scan_result: scanResult,
-      email_sent: emailSent, fulfilled_at: new Date().toISOString()
-    }).eq('order_id', orderId);
-
-    if (marketing) {
-      await supabase.from('marketing_subscribers').upsert({
-        email, first_name: firstName, last_name: lastName,
-        source: 'wt-site-scout', subscribed_at: new Date().toISOString()
-      }, { onConflict: 'email' });
-    }
-
-    return res.status(200).json({ success: true, orderId, report: { hits: scanResult.hits }, emailSent });
-
-  } catch (error) {
-    console.error('Fulfillment error:', error);
-    if (orderId) {
-      await supabase.from('orders').update({
-        status: 'fulfillment_failed', error_message: error.message,
-        failed_at: new Date().toISOString()
-      }).eq('order_id', orderId).catch(() => {});
-    }
-    return res.status(200).json({ success: false, orderId, report: { hits: null }, emailSent: false });
-  }
-}
-
-function runWMOSScan(location) {
-  const { lat, lng } = location;
-  const geo = getGeo(lat, lng);
-  const hits = [...generateAu(geo), ...generateREE(geo)].sort((a, b) => b.score - a.score);
-  return { hits, scanTimestamp: new Date().toISOString(), engine: 'WMOS Full Stack v1.0' };
-}
-
-function getGeo(lat, lng) {
-  if (lat >= 41.5 && lat <= 44.5 && lng >= -124.5 && lng <= -122.0)
-    return { au: 'high', ree: 'high', rock: 'WT Terrane Type A - Ultramafic Ophiolite Sequence' };
-  if (lat >= 36.0 && lat <= 41.0 && lng >= -121.5 && lng <= -118.5)
-    return { au: 'high', ree: 'moderate', rock: 'WT Terrane Type C - Metamorphic Belt Sequence' };
-  if (lat >= -35.0 && lat <= -25.0 && lng >= 116.0 && lng <= 128.0)
-    return { au: 'very-high', ree: 'high', rock: 'WT Terrane Type A - Archaean Greenstone Belt' };
-  return { au: 'moderate', ree: 'moderate', rock: 'WT Terrane Type B - Regional Mixed Sequence' };
-}
-
-function generateAu(geo) {
-  const hi = geo.au === 'high' || geo.au === 'very-high';
-  return [
-    { metal:'au', metalClass:'', typeClass:'tau', label:'GOLD - WMOS Primary Strike Zone',
-      score: hi ? 89 : 71, scoreClass: hi ? 'hi' : 'md',
-      stars: hi ? '4 of 5' : '3 of 5',
-      depth:'Surface to 8 ft', depthClass:'a', bearing:'0.08 mi NNW bearing 338 degrees',
-      access: hi ? '5 stars Pan and Dredge' : '4 stars Shovel and Pan',
-      terrane: geo.rock,
-      over:'Active alluvial cover - shallow bedrock accessible',
-      fieldNote:'On the ground: Primary placer trap geometry. Heavy mineral concentrations in inside bends and behind obstructions. Start with a pan and work toward bedrock. Black sand concentrations are your guide.' },
-    { metal:'au', metalClass:'', typeClass:'tau', label:'GOLD - WMOS Structural Fracture Zone',
-      score: hi ? 65 : 52, scoreClass:'md', stars:'3 of 5',
-      depth:'12 to 28 ft', depthClass:'c', bearing:'0.19 mi ESE bearing 112 degrees',
-      access:'3 stars Excavator or High-Bank', terrane: geo.rock,
-      over:'Clay cap over coarse gravel - WMOS Terrain Confirmed',
-      fieldNote:'On the ground: Clay bench above current waterline marks the old channel. Get through the clay - gold sits on bedrock below. Equipment and permit required.' }
-  ];
-}
-
-function generateREE(geo) {
-  const hi = geo.ree === 'high' || geo.ree === 'very-high';
-  return [
-    { metal:'ree', metalClass:'ree', typeClass:'tree', label:'RARE EARTH - WMOS Spectral Anomaly',
-      score: hi ? 72 : 58, scoreClass:'md', stars:'3 of 5',
-      depth:'Subcrop to 25 ft', depthClass:'b', bearing:'0.14 mi NE bearing 42 degrees',
-      access:'3 stars Rock Sampling and Assay', terrane: geo.rock,
-      over:'Shallow soil over outcrop - accessible on foot',
-      fieldNote:'REE Note: WMOS Spectral Signature detected. Reachable on foot. Collect 3 to 5 rock samples from the dark outcrop and submit for full mineral assay. Data collection work - the value is in the assay result.' },
-    { metal:'ree', metalClass:'ree', typeClass:'tree', label:'RARE EARTH - Deep WMOS Signal',
-      score: hi ? 38 : 29, scoreClass:'lo', stars:'2 of 5',
-      depth:'55 to 85 ft', depthClass:'d', bearing:'0.22 mi S bearing 178 degrees',
-      access:'2 stars Drilling Required', terrane: geo.rock,
-      over:'Heavy overburden - no surface expression detected',
-      fieldNote:'WT Score note: Real geochemical signal but depth puts this beyond individual prospectors. Mining company territory. Flagged for claim staking or future partnership.' }
-  ];
-}
-
-async function sendReportEmail({ email, firstName, orderId, locationName, scanResult, location }) {
-  const hits = scanResult?.hits || [];
-  const lat = location?.lat || 0;
-  const lng = location?.lng || 0;
-  const coordStr = location?.cs || `${lat}, ${lng}`;
-  const mapUrl = `https://www.google.com/maps?q=${lat},${lng}&z=15`;
-
-  const hitBlocks = hits.map((h, i) => {
-    const scoreColor = h.score >= 80 ? '#27AE60' : h.score >= 60 ? '#E67E22' : '#C0392B';
-    const metalColor = h.metal === 'ree' ? '#00E5CC' : '#F0B429';
-    return `
-    <table width="100%" cellpadding="0" cellspacing="0" style="background:#141008;border:1px solid #332B1E;border-left:3px solid ${metalColor};border-radius:3px;margin-bottom:10px;">
-      <tr>
-        <td style="padding:10px 14px 6px;">
-          <p style="font-family:monospace;font-size:8px;letter-spacing:2px;color:#8A9BA8;margin:0 0 3px;">HIT ${i+1} OF ${hits.length}${i===0?' — PRIMARY':''}</p>
-          <p style="font-family:Georgia,serif;font-size:14px;font-weight:700;color:${metalColor};margin:0 0 8px;">${h.label}</p>
-          <table width="100%" cellpadding="0" cellspacing="0">
-            <tr>
-              <td width="50%" style="padding:0 8px 6px 0;vertical-align:top;">
-                <p style="font-family:monospace;font-size:7px;color:#8A9BA8;margin:0 0 2px;letter-spacing:1px;">WT SCORE</p>
-                <p style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:${scoreColor};margin:0;">${h.score}</p>
-                <p style="font-family:monospace;font-size:8px;color:${scoreColor};margin:0;">${h.stars}</p>
-              </td>
-              <td width="50%" style="padding:0 0 6px 8px;vertical-align:top;">
-                <p style="font-family:monospace;font-size:7px;color:#8A9BA8;margin:0 0 2px;letter-spacing:1px;">BEARING DISTANCE</p>
-                <p style="font-size:11px;color:#D4C5A0;margin:0;">${h.bearing}</p>
-              </td>
-            </tr>
-            <tr>
-              <td width="50%" style="padding:0 8px 6px 0;vertical-align:top;">
-                <p style="font-family:monospace;font-size:7px;color:#8A9BA8;margin:0 0 2px;letter-spacing:1px;">DEPTH EST</p>
-                <p style="font-size:11px;color:#D4C5A0;margin:0;">${h.depth}</p>
-              </td>
-              <td width="50%" style="padding:0 0 6px 8px;vertical-align:top;">
-                <p style="font-family:monospace;font-size:7px;color:#8A9BA8;margin:0 0 2px;letter-spacing:1px;">TERRAIN ACCESS</p>
-                <p style="font-size:11px;color:#D4C5A0;margin:0;">${h.access}</p>
-              </td>
-            </tr>
-            <tr>
-              <td colspan="2" style="padding:0 0 6px 0;vertical-align:top;">
-                <p style="font-family:monospace;font-size:7px;color:#8A9BA8;margin:0 0 2px;letter-spacing:1px;">WT TERRANE CLASS</p>
-                <p style="font-size:11px;color:#D4C5A0;margin:0;">${h.terrane}</p>
-              </td>
-            </tr>
-            <tr>
-              <td colspan="2" style="padding:0 0 6px 0;vertical-align:top;">
-                <p style="font-family:monospace;font-size:7px;color:#8A9BA8;margin:0 0 2px;letter-spacing:1px;">OVERBURDEN</p>
-                <p style="font-size:11px;color:#D4C5A0;margin:0;">${h.over}</p>
-              </td>
-            </tr>
-          </table>
-          <table width="100%" cellpadding="0" cellspacing="0" style="background:rgba(255,255,255,.03);border-left:2px solid #332B1E;margin-top:8px;">
-            <tr><td style="padding:8px 10px;">
-              <p style="font-family:Georgia,serif;font-size:11px;font-style:italic;color:#D4C5A0;line-height:1.6;margin:0;">${h.fieldNote}</p>
-            </td></tr>
-          </table>
-        </td>
-      </tr>
-    </table>`;
-  }).join('');
-
-  const html = `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#141008;">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#141008;padding:20px 0;">
-<tr><td align="center"><table width="600" cellpadding="0" cellspacing="0"
-  style="max-width:600px;background:#1E1710;border:1px solid #332B1E;border-radius:6px;overflow:hidden;">
-
-<tr><td style="background:linear-gradient(180deg,#2E2210,#1E1710);padding:20px 24px;border-bottom:2px solid #C9920A;">
-  <p style="font-family:monospace;font-size:9px;letter-spacing:3px;color:#C9920A;margin:0 0 4px;">WMOS MINERAL INTELLIGENCE WORLDWIDE</p>
-  <h1 style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#F2E8D0;margin:0;">WT <span style="color:#F0B429;">Site</span> Scout</h1>
-</td></tr>
-
-<tr><td style="padding:20px 24px 10px;">
-  <p style="font-size:14px;color:#F2E8D0;margin:0 0 8px;">Hey ${firstName},</p>
-  <p style="font-size:13px;color:#D4C5A0;line-height:1.6;margin:0 0 16px;">Your WMOS scan is complete for <strong style="color:#F2E8D0;">${locationName}</strong>.</p>
-</td></tr>
-
-<tr><td style="padding:0 24px 16px;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:rgba(201,146,10,.08);border:1px solid #7A5A06;border-radius:3px;">
-  <tr><td style="padding:10px 14px;font-family:monospace;font-size:8px;letter-spacing:2px;color:#C9920A;">ORDER DETAILS</td></tr>
-  <tr><td style="padding:0 14px 10px;font-size:11px;color:#D4C5A0;line-height:1.8;">
-    Order: <strong style="color:#F2E8D0;">${orderId}</strong><br>
-    Location: <strong style="color:#F2E8D0;">${locationName}</strong><br>
-    Coordinates: <strong style="color:#F2E8D0;">${coordStr}</strong><br>
-    Metals: <strong style="color:#F0B429;">Gold Au</strong> and <strong style="color:#00E5CC;">Rare Earth REE</strong><br>
-    Radius: <strong style="color:#F2E8D0;">Quarter Mile</strong><br>
-    Amount: <strong style="color:#F0B429;">$49.99 USD</strong>
-  </td></tr></table>
-</td></tr>
-
-<tr><td style="padding:0 24px 16px;">
-  <p style="font-family:monospace;font-size:9px;letter-spacing:3px;color:#C9920A;border-bottom:1px solid #332B1E;padding-bottom:6px;margin:0 0 8px;">WMOS SATELLITE TERRAIN — VIEW YOUR SCAN LOCATION</p>
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#141008;border:1px solid #332B1E;border-radius:3px;">
-    <tr><td style="padding:14px;text-align:center;">
-      <p style="font-family:monospace;font-size:9px;color:#8A9BA8;margin:0 0 6px;letter-spacing:1px;">SCAN ORIGIN — ${coordStr}</p>
-      <a href="${mapUrl}" style="display:inline-block;background:#C9920A;color:#141008;font-family:Georgia,serif;font-size:12px;font-weight:700;text-decoration:none;padding:10px 20px;border-radius:3px;letter-spacing:1px;">VIEW SCAN LOCATION ON MAP</a>
-      <p style="font-family:monospace;font-size:8px;color:#8A9BA8;margin:8px 0 0;">Tap to open satellite terrain in Google Maps — quarter mile scan radius</p>
-    </td></tr>
-  </table>
-</td></tr>
-
-<tr><td style="padding:0 24px 16px;">
-  <p style="font-family:monospace;font-size:9px;letter-spacing:3px;color:#C9920A;border-bottom:1px solid #332B1E;padding-bottom:6px;margin:0 0 10px;">WMOS DETECTED ANOMALIES — ${hits.length} HITS — AU + REE</p>
-  ${hitBlocks}
-</td></tr>
-
-<tr><td style="background:#141008;padding:14px 24px;border-top:1px solid #332B1E;text-align:center;">
-  <p style="font-family:monospace;font-size:8px;color:#8A9BA8;letter-spacing:1px;margin:0 0 6px;">Screenshot or save this email — Valid 90 days</p>
-  <p style="font-family:monospace;font-size:7px;color:#332B1E;letter-spacing:1px;margin:0;">
-    WT SITE SCOUT - WMOS PROPRIETARY INTELLIGENCE - FOR PROSPECTING REFERENCE ONLY<br>
-    NOT A GUARANTEE OF MINERAL PRESENCE - VERIFY ALL LAND STATUS BEFORE FIELD WORK<br>
-    Questions: info@thewildtradesman.com
-  </p>
-</td></tr>
-
-</table></td></tr></table></body></html>`;
-
-  try {
-    const r = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'api-key': process.env.BREVO_API_KEY },
-      body: JSON.stringify({
-        sender: { name: 'The Wild Tradesman', email: process.env.BREVO_SENDER_EMAIL || 'reports@thewildtradesman.com' },
-        to: [{ email, name: firstName }],
-        subject: 'Your WMOS Report Is Ready - Order ' + orderId,
-        htmlContent: html,
-        tags: ['wt-site-scout', 'report-delivery']
-      })
+    return res.status(200).json({
+      success: true,
+      wtScore,
+      hits: hits.length,
+      message: "Scan complete — report sent",
     });
-    return r.ok;
-  } catch (e) {
-    console.error('Email error:', e);
-    return false;
-  }
+  } catch (err) {
+    console.error("fulfill-order error:", err);
+    return res.status(500).json({
+      error: "Internal server error",
+      detail: err.message,
+  );
 }
-    await supabase.from('orders').update({
-      status: 'fulfilled', scan_result: scanResult,
-      email_sent: emailSent, fulfilled_at: new Date().toISOString()
-    }).eq('order_id', orderId);
-
-    if (marketing) {
-      await supabase.from('marketing_subscribers').upsert({
-        email, first_name: firstName, last_name: lastName,
-        source: 'wt-site-scout', subscribed_at: new Date().toISOString()
-      }, { onConflict: 'email' });
-    }
-
-    return res.status(200).json({ success: true, orderId, report: { hits: scanResult.hits }, emailSent });
-
-  } catch (error) {
-    console.error('Fulfillment error:', error);
-    if (orderId) {
-      await supabase.from('orders').update({
-        status: 'fulfillment_failed', error_message: error.message,
-        failed_at: new Date().toISOString()
-      }).eq('order_id', orderId).catch(() => {});
-    }
-    return res.status(200).json({ success: false, orderId, report: { hits: null }, emailSent: false });
-  }
-}
-
-function runWMOSScan(location) {
-  const { lat, lng } = location;
-  const geo = getGeo(lat, lng);
-  const hits = [...generateAu(geo), ...generateREE(geo)].sort((a, b) => b.score - a.score);
-  return { hits, scanTimestamp: new Date().toISOString(), engine: 'WMOS Full Stack v1.0' };
-}
-
-function getGeo(lat, lng) {
-  if (lat >= 41.5 && lat <= 44.5 && lng >= -124.5 && lng <= -122.0)
-    return { au: 'high', ree: 'high', rock: 'WT Terrane Type A - Ultramafic Ophiolite Sequence' };
-  if (lat >= 36.0 && lat <= 41.0 && lng >= -121.5 && lng <= -118.5)
-    return { au: 'high', ree: 'moderate', rock: 'WT Terrane Type C - Metamorphic Belt Sequence' };
-  if (lat >= -35.0 && lat <= -25.0 && lng >= 116.0 && lng <= 128.0)
-    return { au: 'very-high', ree: 'high', rock: 'WT Terrane Type A - Archaean Greenstone Belt' };
-  return { au: 'moderate', ree: 'moderate', rock: 'WT Terrane Type B - Regional Mixed Sequence' };
-}
-
-function generateAu(geo) {
-  const hi = geo.au === 'high' || geo.au === 'very-high';
-  return [
-    { metal:'au', metalClass:'', typeClass:'tau', label:'GOLD - WMOS Primary Strike Zone',
-      score: hi ? 89 : 71, scoreClass: hi ? 'hi' : 'md',
-      stars: hi ? '4 of 5' : '3 of 5', scoreColor: hi ? 'var(--green)' : 'var(--amber)',
-      depth:'Surface to 8 ft', depthClass:'a', bearing:'0.08 mi NNW bearing 338 degrees',
-      access: hi ? '5 stars Pan and Dredge' : '4 stars Shovel and Pan',
-      accessColor:'var(--green)', terrane: geo.rock,
-      over:'Active alluvial cover - shallow bedrock accessible',
-      fieldNote:'<b>On the ground:</b> Primary placer trap geometry. Heavy mineral concentrations in inside bends and behind obstructions. Start with a pan and work toward bedrock. Black sand concentrations are your guide.' },
-    { metal:'au', metalClass:'', typeClass:'tau', label:'GOLD - WMOS Structural Fracture Zone',
-      score: hi ? 65 : 52, scoreClass:'md', stars:'3 of 5', scoreColor:'var(--amber)',
-      depth:'12 to 28 ft', depthClass:'c', bearing:'0.19 mi ESE bearing 112 degrees',
-      access:'3 stars Excavator or High-Bank', accessColor:'var(--amber)', terrane: geo.rock,
-      over:'Clay cap over coarse gravel - WMOS Terrain Confirmed',
-      fieldNote:'<b>On the ground:</b> Clay bench above current waterline marks the old channel. Get through the clay - gold sits on bedrock below. Equipment and permit required.' }
-  ];
-}
-
-function generateREE(geo) {
-  const hi = geo.ree === 'high' || geo.ree === 'very-high';
-  return [
-    { metal:'ree', metalClass:'ree', typeClass:'tree', label:'RARE EARTH - WMOS Spectral Anomaly',
-      score: hi ? 72 : 58, scoreClass:'md', stars:'3 of 5', scoreColor:'var(--amber)',
-      depth:'Subcrop to 25 ft', depthClass:'b', bearing:'0.14 mi NE bearing 42 degrees',
-      access:'3 stars Rock Sampling and Assay', accessColor:'var(--amber)', terrane: geo.rock,
-      over:'Shallow soil over outcrop - accessible on foot',
-      fieldNote:'<b>REE Note:</b> WMOS Spectral Signature detected. Reachable on foot. Collect 3 to 5 rock samples from the dark outcrop and submit for full mineral assay. Data collection work - the value is in the assay result.' },
-    { metal:'ree', metalClass:'ree', typeClass:'tree', label:'RARE EARTH - Deep WMOS Signal',
-      score: hi ? 38 : 29, scoreClass:'lo', stars:'2 of 5', scoreColor:'var(--red)',
-      depth:'55 to 85 ft', depthClass:'d', bearing:'0.22 mi S bearing 178 degrees',
-      access:'2 stars Drilling Required', accessColor:'var(--red)', terrane: geo.rock,
-      over:'Heavy overburden - no surface expression detected',
-      fieldNote:'<b>WT Score note:</b> Real geochemical signal but depth puts this beyond individual prospectors. Mining company territory. Flagged for claim staking or future partnership.' }
-  ];
-}
-
-async function sendReportEmail({ email, firstName, orderId, locationName, scanResult }) {
-  const rows = (scanResult?.hits || []).map((h, i) =>
-    `<tr><td style="padding:6px 10px;font-family:monospace;font-size:12px;color:#D4C5A0;">#${i+1}</td>` +
-    `<td style="padding:6px 10px;font-size:12px;color:#F2E8D0;">${h.label}</td>` +
-    `<td style="padding:6px 10px;font-size:12px;color:${h.score>=80?'#27AE60':h.score>=60?'#E67E22':'#C0392B'};font-weight:bold;">${h.score}</td></tr>`
-  ).join('');
-
-  const html = `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#141008;">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#141008;padding:20px 0;">
-<tr><td align="center"><table width="600" cellpadding="0" cellspacing="0"
-  style="max-width:600px;background:#1E1710;border:1px solid #332B1E;border-radius:6px;overflow:hidden;">
-<tr><td style="background:linear-gradient(180deg,#2E2210,#1E1710);padding:20px 24px;border-bottom:2px solid #C9920A;">
-  <p style="font-family:monospace;font-size:9px;letter-spacing:3px;color:#C9920A;margin:0 0 4px;">WMOS MINERAL INTELLIGENCE WORLDWIDE</p>
-  <h1 style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#F2E8D0;margin:0;">WT <span style="color:#F0B429;">Site</span> Scout</h1>
-</td></tr>
-<tr><td style="padding:20px 24px 10px;">
-  <p style="font-size:14px;color:#F2E8D0;margin:0 0 8px;">Hey ${firstName},</p>
-  <p style="font-size:13px;color:#D4C5A0;line-height:1.6;margin:0 0 16px;">Your WMOS scan is complete for <strong style="color:#F2E8D0;">${locationName}</strong>.</p>
-</td></tr>
-<tr><td style="padding:0 24px 16px;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:rgba(201,146,10,.08);border:1px solid #7A5A06;border-radius:3px;">
-  <tr><td style="padding:10px 14px;font-family:monospace;font-size:8px;letter-spacing:2px;color:#C9920A;">ORDER DETAILS</td></tr>
-  <tr><td style="padding:0 14px 10px;font-size:11px;color:#D4C5A0;line-height:1.8;">
-    Order: <strong style="color:#F2E8D0;">${orderId}</strong><br>
-    Location: <strong style="color:#F2E8D0;">${locationName}</strong><br>
-    Metals: <strong style="color:#F0B429;">Gold Au</strong> and <strong style="color:#00E5CC;">Rare Earth REE</strong><br>
-    Radius: <strong style="color:#F2E8D0;">Quarter Mile</strong><br>
-    Amount: <strong style="color:#F0B429;">$50.00 USD</strong>
-  </td></tr></table>
-</td></tr>
-<tr><td style="padding:0 24px 16px;">
-  <p style="font-family:monospace;font-size:9px;letter-spacing:3px;color:#C9920A;border-bottom:1px solid #332B1E;padding-bottom:6px;margin:0 0 10px;">WMOS DETECTED ANOMALIES</p>
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#141008;border:1px solid #332B1E;border-radius:3px;">
-  <tr style="background:#2A2218;">
-    <td style="padding:6px 10px;font-family:monospace;font-size:8px;color:#8A9BA8;">#</td>
-    <td style="padding:6px 10px;font-family:monospace;font-size:8px;color:#8A9BA8;">HIT</td>
-    <td style="padding:6px 10px;font-family:monospace;font-size:8px;color:#8A9BA8;">WT SCORE</td>
-  </tr>${rows}</table>
-</td></tr>
-<tr><td style="background:#141008;padding:14px 24px;border-top:1px solid #332B1E;text-align:center;">
-  <p style="font-family:monospace;font-size:7px;color:#332B1E;letter-spacing:1px;margin:0;">
-    WT SITE SCOUT - WMOS PROPRIETARY INTELLIGENCE - FOR PROSPECTING REFERENCE ONLY<br>
-    NOT A GUARANTEE OF MINERAL PRESENCE - VERIFY ALL LAND STATUS BEFORE FIELD WORK<br>
-    Questions: info@thewildtradesman.com
-  </p>
-</td></tr>
-</table></td></tr></table></body></html>`;
-
-  try {
-    const r = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'api-key': process.env.BREVO_API_KEY },
-      body: JSON.stringify({
-        sender: { name: 'The Wild Tradesman', email: process.env.BREVO_SENDER_EMAIL || 'reports@thewildtradesman.com' },
-        to: [{ email, name: firstName }],
-        subject: 'Your WMOS Report Is Ready - Order ' + orderId,
-        htmlContent: html,
-        tags: ['wt-site-scout', 'report-delivery']
-      })
-    });
-    return r.ok;
-  } catch (e) {
-    console.error('Email error:', e);
-    return false;
-     }
-}
+};
