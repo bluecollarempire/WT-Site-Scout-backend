@@ -1,7 +1,7 @@
 {
   "version": 2,
   "functions": {
-    "api/*.js": {
+    "api/*.cjs": {
       "memory": 512,
       "maxDuration": 30
     }
