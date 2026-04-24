@@ -180,3 +180,4 @@ async function sendReportEmail({ email, firstName, orderId, locationName, scanRe
     console.error('Email error:', e);
     return false;
      }
+}
