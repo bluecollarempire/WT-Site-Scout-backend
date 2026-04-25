@@ -147,11 +147,11 @@ async function runWMOSScan(location) {
   };
 }
 async function getGeo(lat, lng) {
-  const bbox = [lng-0.25, lat-0.25, lng+0.25, lat+0.25];
+  const bbox = [lng-0.05, lat-0.05, lng+0.05, lat+0.05];
   let deposits = [];
   let elevation = null;
   try {
-    const mrdsUrl = `https://mrdata.usgs.gov/services/mrds?service=WFS&version=1.0.0&request=GetFeature&typeName=mrds&bbox=${bbox.join(',')}&outputFormat=application/json&maxFeatures=50`;
+    const mrdsUrl = `https://mrdata.usgs.gov/services/wfs/mrds?service=WFS&version=1.0.0&request=GetFeature&typeName=mrds&bbox=${bbox.join`;
     const mrdsRes = await fetch(mrdsUrl);
     const mrdsData = await mrdsRes.json();
     deposits = mrdsData.features || [];
