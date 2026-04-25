@@ -21,6 +21,8 @@ export default async function handler(req, res) {
   if (ownerBypass && OWNER_CODE && ownerBypass.trim() === OWNER_CODE.trim()) {
     try {
       const scanResult = runWMOSScan(location);
+      const ownerOrderId = 'OWNER-' + Date.now().toString(36).toUpperCase();
+      await sendReportEmail({ email, firstName, orderId: ownerOrderId, locationName: location.dn || location.label, scanResult, lat: location.lat, lng: location.lng });
       return res.status(200).json({
         success: true,
         orderId: 'OWNER-' + Date.now().toString(36).toUpperCase(),
