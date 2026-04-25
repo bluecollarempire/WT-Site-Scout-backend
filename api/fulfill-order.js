@@ -219,15 +219,9 @@ function generateREE(geo) {
 }
 
 // ── EMAIL DELIVERY VIA BREVO ──
-async function sendReportEmail({ email, firstName, orderId, locationName, scanResult }) {
-  const rows = (scanResult?.hits || []).map((h, i) =>
-    `<tr>
-      <td style="padding:6px 10px;font-family:monospace;font-size:12px;color:#D4C5A0;">#${i + 1}</td>
-      <td style="padding:6px 10px;font-size:12px;color:#F2E8D0;">${h.label}</td>
-      <td style="padding:6px 10px;font-size:12px;color:${h.score >= 80 ? '#27AE60' : h.score >= 60 ? '#E67E22' : '#C0392B'};font-weight:bold;">${h.score}</td>
-    </tr>`
-  ).join('');
-
+async function sendReportEmail({ email, firstName, orderId, locationName, scanResult, lat, lng }) {
+  const mapsUrl = 'https://www.google.com/maps?q='+(lat||'')+','+(lng||'');
+const hitCards = (scanResult?.hits || []).map((h, i) => '<table width="100%" cellpadding="0" cellspacing="0" style="background:#1A1408;border:1px solid #332B1E;border-left:4px solid ' + (h.score >= 80 ? '#27AE60' : h.score >= 60 ? '#E67E22' : '#C0392B') + ';border-radius:3px;margin-bottom:12px;"><tr><td style="padding:12px 14px;"><p style="font-family:monospace;font-size:9px;letter-spacing:2px;color:#8A9BA8;margin:0 0 2px;">HIT #' + (i+1) + '</p><p style="font-size:14px;font-weight:700;color:#F2E8D0;margin:0 0 6px;">' + h.label + '</p><p style="font-size:26px;font-weight:900;color:' + (h.score >= 80 ? '#27AE60' : h.score >= 60 ? '#E67E22' : '#C0392B') + ';font-family:monospace;margin:0 0 10px;">' + h.score + ' <span style="font-size:10px;color:#8A9BA8;">WT SCORE</span></p><table width="100%" cellpadding="0" cellspacing="0"><tr><td width="50%" style="padding:3px 0;"><p style="font-family:monospace;font-size:8px;color:#8A9BA8;margin:0 0 1px;">DEPTH EST</p><p style="font-size:12px;color:#F2E8D0;margin:0;">' + h.depth + '</p></td><td width="50%" style="padding:3px 0;"><p style="font-family:monospace;font-size:8px;color:#8A9BA8;margin:0 0 1px;">BEARING</p><p style="font-size:12px;color:#F2E8D0;margin:0;">' + h.bearing + '</p></td></tr><tr><td width="50%" style="padding:3px 0;"><p style="font-family:monospace;font-size:8px;color:#8A9BA8;margin:0 0 1px;">TERRAIN ACCESS</p><p style="font-size:12px;color:#F2E8D0;margin:0;">' + h.access + '</p></td><td width="50%" style="padding:3px 0;"><p style="font-family:monospace;font-size:8px;color:#8A9BA8;margin:0 0 1px;">WT TERRANE</p><p style="font-size:12px;color:#F2E8D0;margin:0;">' + h.terrane + '</p></td></tr><tr><td colspan="2" style="padding:3px 0;"><p style="font-family:monospace;font-size:8px;color:#8A9BA8;margin:0 0 1px;">OVERBURDEN</p><p style="font-size:12px;color:#F2E8D0;margin:0;">' + h.over + '</p></td></tr></table><div style="margin-top:10px;padding:10px 12px;background:#141008;border-left:3px solid #C9920A;"><p style="font-size:12px;color:#D4C5A0;line-height:1.6;margin:0;">' + h.note + '</p></div></td></tr></table>').join('');
   const html = `<!DOCTYPE html>
 <html>
 <body style="margin:0;padding:0;background:#141008;font-family:Georgia,serif;">
@@ -269,7 +263,7 @@ async function sendReportEmail({ email, firstName, orderId, locationName, scanRe
     <td style="padding:6px 10px;font-family:monospace;font-size:8px;color:#8A9BA8;letter-spacing:1px;">HIT</td>
     <td style="padding:6px 10px;font-family:monospace;font-size:8px;color:#8A9BA8;letter-spacing:1px;">WT SCORE</td>
   </tr>
-  ${rows}
+  ${hitCards}
   </table>
   <p style="font-family:monospace;font-size:8px;color:#8A9BA8;margin:6px 0 0;letter-spacing:.5px;">WT Score 80 plus work it now. 60 to 79 possible with equipment. Below 60 notable but not immediately accessible.</p>
 </td></tr>
