@@ -258,7 +258,7 @@ const hitCards = (scanResult?.hits || []).map((h, i) => '<table width="100%" cel
   </td></tr>
   </table>
 </td></tr>
-
+<tr><td style="padding:8px 24px 16px;text-align:center;"><a href="${mapsUrl}" target="_blank" style="display:inline-block;background:linear-gradient(135deg,#8B6914,#D4A017);color:#000;font-size:11px;font-weight:900;font-family:monospace;letter-spacing:2px;padding:12px 28px;border-radius:4px;text-decoration:none;">VIEW SCAN LOCATION ON MAP</a></td></tr>
 <tr><td style="padding:0 24px 16px;">
   <p style="font-family:monospace;font-size:9px;letter-spacing:3px;color:#C9920A;border-bottom:1px solid #332B1E;padding-bottom:6px;margin:0 0 10px;">WMOS DETECTED ANOMALIES</p>
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#141008;border:1px solid #332B1E;border-radius:3px;">
