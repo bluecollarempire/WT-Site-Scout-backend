@@ -18,6 +18,7 @@ export default async function handler(req, res) {
   // When owner enters WT-OWNER-[code] in location name field
   // payment is skipped and a real WMOS report is generated free
   const OWNER_CODE = process.env.OWNER_BYPASS_CODE;
+  console.log('BYPASS CHECK:', JSON.stringify({received: ownerBypass, stored: OWNER_CODE, match: ownerBypass && OWNER_CODE && ownerBypass.trim() === OWNER_CODE.trim()}));
   if (ownerBypass && OWNER_CODE && ownerBypass.trim() === OWNER_CODE.trim()) {
     try {
       const scanResult = runWMOSScan(location);
