@@ -151,7 +151,7 @@ async function getGeo(lat, lng) {
   let deposits = [];
   let elevation = null;
   try {
-    const mrdsUrl = `https://mrdata.usgs.gov/services/wfs/mrds?service=WFS&version=1.0.0&request=GetFeature&typeName=mrds&bbox=${bbox.join`;
+    const mrdsUrl = `https://mrdata.usgs.gov/services/wfs/mrds?service=WFS&version=1.0.0&request=GetFeature&typeName=mrds&bbox=${bbox.join
     const mrdsRes = await fetch(mrdsUrl);
     const mrdsData = await mrdsRes.json();
     deposits = mrdsData.features || [];
