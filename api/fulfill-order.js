@@ -25,7 +25,7 @@ export default async function handler(req, res) {
       await sendReportEmail({ email, firstName, orderId: ownerOrderId, locationName: location.dn || location.label, scanResult, lat: location.lat, lng: location.lng });
       return res.status(200).json({
         success: true,
-        orderId: ownerOrderId:.toString(36).toUpperCase(),
+        orderId: ownerOrderId,
         report: { hits: scanResult.hits },
         emailSent: true,
         ownerMode: true
