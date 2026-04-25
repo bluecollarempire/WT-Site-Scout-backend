@@ -21,7 +21,7 @@ export default async function handler(req, res) {
   console.log('BYPASS CHECK:', JSON.stringify({received: ownerBypass, stored: OWNER_CODE, match: ownerBypass && OWNER_CODE && ownerBypass.trim() === OWNER_CODE.trim()}));
   if (ownerBypass && OWNER_CODE && ownerBypass.trim() === OWNER_CODE.trim()) {
     try {
-      const scanResult = runWMOSScan(location);
+      const scanResult = await runWMOSScan(location);
       const ownerOrderId = 'OWNER-' + Date.now().toString(36).toUpperCase();
       await sendReportEmail({ email, firstName, orderId: ownerOrderId, locationName: 'Scan ' + location.lat + ', ' + location.lng, scanResult, lat: location.lat, lng: location.lng });
       return res.status(200).json({
@@ -69,7 +69,7 @@ export default async function handler(req, res) {
     });
 
     // 2. Run WMOS analysis
-    const scanResult = runWMOSScan(location);
+    const scanResult = await runWMOSScan(location);
 
     // 3. Send report email via Brevo
     const emailSent = await sendReportEmail({
@@ -130,35 +130,44 @@ export default async function handler(req, res) {
 }
 
 // ── WMOS SCAN ENGINE ──
-function runWMOSScan(location) {
+
+async function runWMOSScan(location) {
   const { lat, lng } = location;
-  const geo = getGeo(lat, lng);
+  const geo = await getGeo(lat, lng);
   const hits = [...generateAu(geo), ...generateREE(geo)].sort((a, b) => b.score - a.score);
   return {
     hits,
     scanTimestamp: new Date().toISOString(),
-    engine: 'WMOS Full Stack v1.0'
+    engine: 'WMOS Real Data Engine v2.0',
+    dataSource: 'USGS MRDS + USGS 3DEP Elevation',
+    depositsFound: geo.depositCount,
+    goldDepositsNearby: geo.goldCount,
+    nearbyDeposits: geo.nearbyDeposits,
+    elevation: geo.elevation
   };
 }
-
-function getGeo(lat, lng) {
-  // Klamath Mountains / Josephine Ophiolite
-  if (lat >= 41.5 && lat <= 44.5 && lng >= -124.5 && lng <= -122.0)
-    return { au: 'high', ree: 'high', rock: 'WT Terrane Type A - Ultramafic Ophiolite Sequence' };
-  // Sierra Nevada Mother Lode
-  if (lat >= 36.0 && lat <= 41.0 && lng >= -121.5 && lng <= -118.5)
-    return { au: 'high', ree: 'moderate', rock: 'WT Terrane Type C - Metamorphic Belt Sequence' };
-  // Australian Goldfields Yilgarn Craton
-  if (lat >= -35.0 && lat <= -25.0 && lng >= 116.0 && lng <= 128.0)
-    return { au: 'very-high', ree: 'high', rock: 'WT Terrane Type A - Archaean Greenstone Belt' };
-  // West African Craton
-  if (lat >= 4.0 && lat <= 14.0 && lng >= -8.0 && lng <= 2.0)
-    return { au: 'high', ree: 'moderate', rock: 'WT Terrane Type B - Birimian Greenstone Belt' };
-  // Canadian Shield
-  if (lat >= 45.0 && lat <= 65.0 && lng >= -95.0 && lng <= -60.0)
-    return { au: 'high', ree: 'moderate', rock: 'WT Terrane Type A - Precambrian Shield Sequence' };
-  // Default global
-  return { au: 'moderate', ree: 'moderate', rock: 'WT Terrane Type B - Regional Mixed Sequence' };
+async function getGeo(lat, lng) {
+  const bbox = [lng-0.25, lat-0.25, lng+0.25, lat+0.25];
+  let deposits = [];
+  let elevation = null;
+  try {
+    const mrdsUrl = `https://mrdata.usgs.gov/services/mrds?service=WFS&version=1.0.0&request=GetFeature&typeName=mrds&bbox=${bbox.join(',')}&outputFormat=application/json&maxFeatures=50`;
+    const mrdsRes = await fetch(mrdsUrl);
+    const mrdsData = await mrdsRes.json();
+    deposits = mrdsData.features || [];
+  } catch(e) { console.error('MRDS fetch error:', e.message); }
+  try {
+    const epqsUrl = `https://nationalmap.gov/epqs/pqs.php?x=${lng}&y=${lat}&units=Meters&output=json`;
+    const epqsRes = await fetch(epqsUrl);
+    const epqsData = await epqsRes.json();
+    elevation = epqsData?.USGS_Elevation_Point_Query_Service?.Elevation_Query?.Elevation;
+  } catch(e) { console.error('EPQS fetch error:', e.message); }
+  const goldDeposits = deposits.filter(f => (f.properties?.commod1||'').toLowerCase().includes('gold') || (f.properties?.commod2||'').toLowerCase().includes('gold'));
+  const reeDeposits = deposits.filter(f => ['rare earth','ree','lanthan','cerium','neodymium'].some(r => (f.properties?.commod1||'').toLowerCase().includes(r)));
+  const auScore = goldDeposits.length > 5 ? 'very-high' : goldDeposits.length > 2 ? 'high' : goldDeposits.length > 0 ? 'moderate' : 'low';
+  const reeScore = reeDeposits.length > 3 ? 'high' : reeDeposits.length > 0 ? 'moderate' : 'low';
+  const rock = goldDeposits.length > 0 ? (goldDeposits[0].properties?.rocktype1 || 'USGS Verified Mineral Terrane') : 'USGS Regional Survey — No Gold Deposits on Record';
+  return { au: auScore, ree: reeScore, rock, elevation, depositCount: deposits.length, goldCount: goldDeposits.length, reeCount: reeDeposits.length, nearbyDeposits: goldDeposits.slice(0,3).map(f => f.properties?.dep_name || 'Unnamed deposit') };
 }
 
 function generateAu(geo) {
