@@ -74,7 +74,9 @@ export default async function handler(req, res) {
       firstName,
       orderId,
       locationName: location.dn || location.label,
-      scanResult
+      scanResult,
+      lat: location.lat,
+      lng: location.lng
     });
 
     // 4. Update order status
