@@ -262,11 +262,7 @@ const hitCards = (scanResult?.hits || []).map((h, i) => '<table width="100%" cel
 <tr><td style="padding:0 24px 16px;">
   <p style="font-family:monospace;font-size:9px;letter-spacing:3px;color:#C9920A;border-bottom:1px solid #332B1E;padding-bottom:6px;margin:0 0 10px;">WMOS DETECTED ANOMALIES</p>
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#141008;border:1px solid #332B1E;border-radius:3px;">
-  <tr style="background:#2A2218;">
-    <td style="padding:6px 10px;font-family:monospace;font-size:8px;color:#8A9BA8;letter-spacing:1px;">#</td>
-    <td style="padding:6px 10px;font-family:monospace;font-size:8px;color:#8A9BA8;letter-spacing:1px;">HIT</td>
-    <td style="padding:6px 10px;font-family:monospace;font-size:8px;color:#8A9BA8;letter-spacing:1px;">WT SCORE</td>
-  </tr>
+
   ${hitCards}
   </table>
   <p style="font-family:monospace;font-size:8px;color:#8A9BA8;margin:6px 0 0;letter-spacing:.5px;">WT Score 80 plus work it now. 60 to 79 possible with equipment. Below 60 notable but not immediately accessible.</p>
