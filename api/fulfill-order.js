@@ -152,9 +152,8 @@ async function getGeo(lat, lng) {
   let elevation = null;
   try {
     const bboxStr = bbox.join(',');
-    https://mrdata.usgs.gov/services/wfs/mrds?service=WFS&version=1.0.0&request=GetFeature&typeName=mrds&bbox='+bboxStr+'&outputFormat=application/json&maxFeatures=50
-    const mrdsUrl = `https://mrdata.usgs.gov/services/wfs/mrds
-    const mrdsRes = await fetch(mrdsUrl);
+    https://mrdata.usgs.gov/services/wfs/mrds?service=WFS&version=1.0.0&request=GetFeature&typeName=mrds&bbox='+bboxStr+'&outputFormat=application/json&maxFeatures=50';
+   mrdsRes = await fetch(mrdsUrl);
     const mrdsData = await mrdsRes.json();
     deposits = mrdsData.features || [];
   } catch(e) { console.error('MRDS fetch error:', e.message); }
