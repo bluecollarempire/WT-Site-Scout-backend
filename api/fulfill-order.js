@@ -152,8 +152,8 @@ async function getGeo(lat, lng) {
   let elevation = null;
   try {
     const bboxStr = bbox.join(',');
-    const p1='https://mrdata.usgs.gov/services/wfs/mrds';
-    const p2='?service=WFS&version=1.0.0&request=GetFeature&typeName=mrds&bbox=';
+   const p1='https://mrdata.usgs.gov/wfs/mrds';
+    const p2='?service=WFS&version=1.1.0&request=GetFeature&typeName=mrds&outputFormat=application/json&bbox=';
     const mrdsUrl=p1+p2+bboxStr+'&outputFormat=application/json&maxFeatures=50';
     const mrdsRes=await fetch(mrdsUrl);
     const mrdsData=await mrdsRes.json();
